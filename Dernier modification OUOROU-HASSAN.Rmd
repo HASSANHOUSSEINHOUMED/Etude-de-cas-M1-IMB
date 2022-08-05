@@ -1,0 +1,1005 @@
+---
+title: 'Etude de cas : estimation de la pénétrance de la maladie d’Alzheimer associée
+  à des variants rares dans le gène SORL1'
+author: "OUOROU_Rachidou- HOUSSEIN_Hassan"
+date: "15/03/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+library(cowplot)
+
+library(survival)
+
+library(kinship2)
+
+load("APOE.mu.RData")
+load("APOE.sigma.RData")
+source("APOE.R")
+```
+
+# Questions
+
+## Questions 1 ( étapes 1 à 7)
+
+Construction aléatoire de $N  = 30$ dataEvals avec $\theta = 0.01$. Critère de sélection des cas index : 
+
+
+- Être malade avant 20 ans
+- Porteur du variant d'intérêt
+- Si plusieurs enfants de  dataEval respectent le critère, le cas index sera celui ayant débuté la maladie le plus tôt.
+
+Pour ce faire, on crée une fonction dont les paramètre sont N et $\theta$ et qui rend en sortie la cohorte de N dataEval
+
+### Fonction `make_cohort()`
+
+```{r}
+# une fonction qui prend en entrée le nombre de dataEval dans la cohorte et
+# Le paramètre thêta
+
+make_cohort = function(N = 30, theta = 0.01){
+  
+  # Initialisation du jeu de donnée qui contiendra la cohorte
+  
+  cohorte = data.frame(
+    famid = vector(mode = "integer", length = 5),
+    indid = vector(mode = "integer", length = 5),
+    sexe = vector(mode = "integer", length = 5),
+    patid = vector(mode = "integer", length = 5),
+    matid = vector(mode = "integer", length = 5),
+    variant = vector(mode = "integer", length = 5),
+    statut = vector(mode = "integer", length = 5),
+    age = vector(mode = "integer", length = 5),
+    index = vector(mode = "integer", length = 5)
+    
+  )
+  # compteur du nombre de dataEval
+  n = 1
+  while (n <= N) {
+  
+    # Etape 1  
+  # Création d'une dataEval dont on simulera les données et qu'on 
+    # retiendra ou non en fonction de la présence ou non de cas index
+    famid = rep(n, 5)
+    indid = 1:5
+    sexe = c(1,2,1,2,1)
+    patid = c(0,0,1,1,1)
+    matid = c(0,0,2,2,2)
+    familiy = data.frame(famid, indid, sexe, patid, matid)
+  # Etape 2
+    # Choix aléatoire du parent porteur du variant
+    
+    a = sample(c(1,2), size = 1)
+    if(a == 1){
+      parent = c(1, 0)
+    }else{parent = c(0,1)}
+    # Tirage aléatoire de la présence ou no du variant che les enfants
+    
+    enfant = sample( c(0,1),  3, replace = T, prob = rep(0.5,2))
+    
+    familiy$variant = c(parent, enfant)
+  
+  # Etape 3
+    # simulation de l'âge de début de la maladie
+    u <- runif(n = 5, min = 0, max = 1)
+    debut = -log(u) / (theta*familiy$variant)
+    
+    # Etape 4
+    ## Simulation de l'age de censure
+    censure <- runif(n = 5, min = 50, max = 100)
+    
+    # Etape 5
+    ## le statut et l'age (censure ou debut en fonction du statut)
+    
+    familiy$statut = ifelse(censure < debut, 0, 1)
+    ## On utilise ceiling pour arrondir a la valeur supérieur
+    ## De sorte que les valeur 0,... ne soit pas arrondi a 0
+    ## Car survreg ne prend pas en compte les valeur time == 0
+    familiy$age = ceiling(ifelse(familiy$statut == 1, debut, censure))
+    
+    # Etape 6
+    ## Détermination de l'existence du cas index
+    ## Par défaut, personne ne l'est
+    familiy$index = rep(0, 5)
+    ## Vérification chez les enfant
+    familiy$index[3:5] = ifelse(familiy$variant[3:5] == 1 & 
+                             familiy$age[3:5] < 20 & familiy$statut[3:5] == 1, 1, 0)
+    ## En cas de plusieur cas index on ne garde que l'enfant le moins âgée
+    if(sum(familiy$index) > 0){
+      ind = min(familiy$age[familiy$index == 1]) 
+      familiy$index[which(familiy$age == ind)] = NA 
+      familiy$index = ifelse(is.na(familiy$index), 1, 0)
+    }
+    ## Sélection de la dataEval ou non
+    if(any(familiy$index == 1)){
+      cohorte = rbind(cohorte, familiy) 
+      n = n+1
+    }
+
+  }
+  ## Comme au début on avait créer 5 lignes avec que des 0 
+  ## On les retire dans le rendu 
+  return(cohorte[-(1:5), ])
+}
+
+```
+
+### Application de la fonction `make_cohort`
+
+```{r}
+set.seed(560)
+cohorte = make_cohort(N = 30,theta = 0.01)
+head(cohorte)
+```
+
+## Question 2 : Description de la cohorte
+
+### Répartition selon le sexe
+
+```{r}
+cohorte %>%
+  group_by(sexe) %>%
+  summarise(Effectif = n()) %>%
+  mutate(sexe = c("Masculin", "Féminin"))%>%
+  ggplot() +
+    geom_col(aes(y = sexe, x = Effectif), fill = "#2a9d8f") +
+  theme_bw() +
+  geom_label(aes(y = sexe, x = Effectif, label = Effectif), fill = "#bde0fe") +
+  labs(title = "Distribution des patients selon le genre")
+```
+Dans notre étude, on constate que la majorité des patients sont de sexe masculin, soit 58 personnes.
+```{r fig.height= 1.5, fig.asp= 0.7}
+
+A = ggplot(cohorte) +
+  geom_boxplot(aes(x = factor(statut), y = age)) +
+  labs(title = "Age en fonction du staut de la maladie et de la présence ou non du variant")+
+  facet_wrap(facets = ~factor(variant))+
+  theme_light()
+
+B = cohorte %>%
+  group_by(statut) %>%
+  summarise(Effectif = n()) %>%
+  mutate(statut = c("Non Malade", "Malade"))%>%
+  ggplot() +
+    geom_col(aes(y = statut, x = Effectif,), fill = c("#2a9d8f", "#e63946")) +
+  theme_bw() +
+  geom_label(aes(y = statut, x = Effectif, label = Effectif), fill = "#bde0fe")
+
+plot_grid(B, A, nrow = 2)
+```
+
+Notre cohorte est composé de 88 personnes non atteint de la maladie et 62 personnes malade
+On remarque d'abord qu'aucun non porteur du variant ne développe la maladie étudié. Ensuite, chez les porteurs du variant, on note un âge en général très élevé pour les non malades (**censure**) contrairement au malade dont 75% développe la maladie avant 40 ans.
+
+
+## Question 3
+
+### Détermination de $\hat{\theta}$ dans la cohorte 1
+
+```{r}
+library(survival)
+cohorte = cohorte %>%
+  filter(variant == 1)
+model <- survreg(Surv(cohorte$age, cohorte$statut)~ 1, dist="exponential")
+
+estimation_theta <- exp(- model$coefficients)
+estimation_theta
+```
+
+
+### Courbe de pénétrance
+
+```{r}
+
+model.exp <- survreg(Surv(cohorte$age, cohorte$statut)~1, dist="exponential")
+pred.exp <- predict(model.exp, type = "quantile", p = seq(0.01, 0.99, by = 0.01))[1,]
+plot(pred.exp, seq(0.01, 0.99, by = 0.01), col = "red", type = "l")    
+
+```
+
+
+## Question 4 
+
+### Estimation de 500 valeurs de $\hat{\theta}$
+
+```{r}
+set.seed(1111)
+
+compute_theta = function(){
+  cohorte = make_cohort(N = 30, theta = 0.01)
+  cohorte = cohorte %>%
+  filter(variant == 1)
+  model <- survreg(Surv(cohorte$age, cohorte$statut) ~ 1,
+                 dist = "exponential" )
+  estimation_theta <- exp(- model$coefficients)
+  return(estimation_theta)
+}
+
+  
+theta_500 = replicate(n=500, compute_theta())
+
+```
+
+### Description des $\theta$
+```{r}
+summary(theta_500)
+boxplot(theta_500, main = "Distribution des estimation de theta", ylim = c(0.01, 0.026))
+points(x = 1,y = 0.01, col = "red", pch = 19, cex = 2)
+abline(h = 0.01, lwd = 2, lty = 2, col = 2)
+```
+
+On remarque une surestimation des $\hat\theta$ obtenu sur les porteurs du variant de la cohorte.
+
+## Question 5 
+
+On supprime les cas index et on ré-estime les valeurs de $\hat\theta$. 
+
+```{r}
+
+set.seed(11111)
+
+compute_theta_hors_index = function(time = 500){
+  cohorte = make_cohort(N = 30, theta = 0.01)
+  cohorte =  cohorte %>%
+  filter(variant == 1 & index == 0)
+  model <- survreg(Surv(cohorte$age, cohorte$statut) ~ 1,
+                 dist = "exponential" )
+  estimation_theta <- exp(- model$coefficients)
+  return(estimation_theta)
+}
+
+theta_hors_index = replicate(n = 500, compute_theta_hors_index())
+  
+
+```
+
+
+```{r}
+summary(theta_hors_index)
+par(mfrow = c(1, 2))
+boxplot(theta_hors_index, main = "Distribution des estimation \n de theta sans index")
+points(x = 1,y = 0.01, col = "red", pch = 19, cex = 2)
+abline(h = 0.01, lwd = 2, lty = 2, col = 2)
+
+boxplot(theta_500,ylim = c(0.01, 0.026), main = "Distribution des estimation \n de theta (index inclu)")
+points(x = 1,y = 0.01, col = "red", pch = 19, cex = 2)
+abline(h = 0.01, lwd = 2, lty = 2, col = 2)
+```
+
+On remarque une nette amélioration des $\theta$ lorsqu'on retire les cas index qui constitue un biais de sélection des individus. 
+Afin d'améliorer les simulation, on pourrait aussi étendre la simulation sur les plus de membres de la familles (grand parents, ancêtres).
+
+
+## Question 6 
+
+
+```{r}
+compute_theta = function() {
+  cohorte = make_cohort(N = 100, theta = 0.01)
+  cohorte = cohorte[cohorte$index == 0 & cohorte$variant == 1, ]
+  model <- survreg(Surv(cohorte$age, cohorte$statut) ~ 1,
+                 dist = "exponential" )
+  estimation_theta <- exp(- model$coefficients)
+  return(estimation_theta)
+}
+
+theta_500_50f = replicate(n=500, compute_theta())
+
+```
+
+
+```{r}
+boxplot(theta_500_50f, main = "Distribution des estimation de theta")
+points(x = 1,y = 0.01, col = "red", pch = 19, cex = 2)
+abline(h = 0.01, lwd = 2, lty = 2, col = 2)
+```
+
+
+On remarque que l'augmentation du nombre de dataEval n'améliore pas en soit l'estimation de $\hat{\theta}$. 
+
+# Partie 2 : Analyse de l'effet d'un variant rare ajusté sur l'effet d'un variant fréquent
+
+## Question 1 : Description de la cohorte
+
+
+
+```{r}
+library(tidyverse)
+
+# Importation du jeu de données
+dataEval = read.table("dataEVAL.txt", header = TRUE, 
+                    colClasses = c(rep("numeric", 6), rep("character", 2), rep("numeric", 2)))
+
+dataEval = as_tibble(dataEval)
+dataEval
+
+```
+
+Le jeu de données contient 324 individus et 10 variables. On ne présentera plus ces variables car elles ont déjà été décrites dans le sujet. 
+
+On procède d'abord à un premier recodage de la variable `APOE` en regroupant les génotype de type  `Ab` (Les hétérozygotes considéré comme différent: *Exemple : "23", "32"*)
+
+
+
+```{r}
+dataEval = dataEval %>%
+  mutate(APOE.recode = case_when(
+    APOE == "32" ~ "23",
+    APOE == "42" ~ "24",
+    APOE == "43" ~ "34",
+    TRUE ~ as.character(APOE)
+  ))
+
+dataEval %>%
+  group_by(APOE.recode)%>%
+  summarise(Effectif = n()) %>%
+  arrange(desc(Effectif)) %>%
+  mutate(Frequence = paste(round(Effectif/sum(Effectif), 4)*100, "%"))
+```
+On remarquera d'abord que le génotype le plus fréquent du gène APOE est le génotype "33" avec une fréquence de 39% suivi du génotype "34" porté par 108 personnes (33%).
+
+
+Ensuite on recode la variable `APOE` en une variable qui contiendra le nombre d'allèle 4 dans le génotype de l'individu.
+
+```{r}
+dataEval = dataEval %>%
+  mutate(APOE.nb4 = case_when(
+    APOE.recode %in% c("22","23", "33") ~ 0,
+    APOE.recode %in% c("24", "34") ~ 1,
+    APOE.recode == "44" ~ 2
+  ))
+```
+
+
+Recodage de la variable `SORL1`
+
+```{r}
+dataEval %>%
+  mutate(SOLR1.recode = case_when(
+    SORL1 == "00" ~ 0, 
+    TRUE  ~  1
+  )) -> dataEval
+```
+
+# Graphe de description
+
+```{r}
+A =dataEval %>%
+  mutate(status = case_when(
+    status == 0  ~ "Non malade",
+    TRUE ~ "Malade"
+  )) %>%
+  ggplot() +
+  geom_boxplot(aes(x = factor(status), y = age)) +
+  labs(title = "Age en fonction du staut de la maladie et de la présence ou non du variant")+
+  facet_wrap(facets = ~factor(SOLR1.recode))+
+  theme_light()
+
+B = dataEval %>%
+  group_by(status) %>%
+  summarise(Effectif = n()) %>%
+  mutate(status = c("Non Malade", "Malade"))%>%
+  ggplot() +
+    geom_col(aes(y = status, x = Effectif,), fill = c("#2a9d8f", "black")) +
+  theme_bw() +
+  geom_label(aes(y = status, x = Effectif, label = Effectif), fill = "#bde0fe")
+
+plot_grid(B, A, nrow = 2)
+```
+La cohorte familiale comporte de 324 personnes dont 259 non malade et 65 personnes atteintes de la maladie d'Alzheimer.
+
+
+```{r}
+dataEval %>%
+  mutate(APOE.nb4 = case_when(
+    APOE.nb4 == 0  ~ "Pas d'allèle 4",
+    APOE.nb4 == 1  ~ "1 allèle 4",
+    APOE.nb4 == 2  ~ "2 allèles 4"
+  )) %>%
+  mutate(status = case_when(
+    status == 0  ~ "Non malade",
+    TRUE ~ "Malade"
+  )) %>%
+  ggplot() +
+  geom_boxplot(aes(x = factor(status), y = age)) +
+  labs(title = "Age en fonction du staut de la maladie et de la présence d'allèle 4")+
+  facet_wrap(facets = ~factor(APOE.nb4))+
+  theme_light()
+```
+
+
+# Question 2
+
+Affichons les arbres de deux dataEvals
+
+```{r}
+
+dataEval1 <- dataEval %>%
+  filter(famid == 1)
+dataEval1
+
+arbre1 <- pedigree(id = dataEval1$indid, momid = dataEval1$matid, dadid = dataEval1$patid, 
+                  sex = dataEval1$sex, affected = dataEval1$status)
+
+plot(arbre1, id = paste0(dataEval1$indid, "\n", 
+                        dataEval1$APOE, "/", dataEval1$SORL1,
+                        "\n", round(dataEval1$age), " ans"))
+```
+On est en présence d'une famille recruté à partir de l'individu 10 (cas index) porteur d'un variant sorl1(sans allèle 4) et ayant contracté la maladie à 41 ans.  La mère de l'index aussi à développé la maladie à 66ans et est porteuse d'un variant. Le dernier individu malade de la famille est le 8 ( cependant non porteur du variant et non porteur d'allèle 4)
+
+
+
+
+```{r}
+
+# dataEval 2
+dataEval2 <- dataEval %>%
+  filter(famid == 2)
+arbre2 <- pedigree(id = dataEval2$indid, momid = dataEval2$matid, dadid = dataEval2$patid, 
+                   sex = dataEval2$sex, affected = dataEval2$status)
+plot(arbre2, id = paste0(dataEval2$indid, "\n", 
+                         dataEval2$APOE, "/", dataEval2$SORL1,
+                         "\n", round(dataEval2$age)))
+
+```
+Dans cette famille, uniquement deux personnes ont développer la maladie. L'un a 68 ans et porteur d'un variant et l'autre à 43 également porteur d'un variant sorl1 et d'un allèle 4 dans son génotype APOE.
+## Question 3
+
+```{r}
+
+num <- dataEval %>%
+    filter(SOLR1.recode == 1  & index == 0) %>%
+    summarise(sum(status)) %>%
+    pull()
+  
+  
+
+# denominateur
+
+dataEval  <- dataEval %>%
+      mutate(Lnc = mapply(CumulLambda.APOE, nb4 = APOE.nb4, t = age, u = 0)) 
+
+denom <- dataEval %>%
+    filter(SOLR1.recode == 1  & index == 0) %>%
+    summarise(sum(Lnc)) %>%
+    pull()
+  
+
+# beta
+beta = log(num/denom)
+beta
+
+
+age = 40:115
+
+L10 <- mapply(CumulLambda.APOE, nb4 = 0, t = age, u = 0)
+penetrance10 <-  1 - exp(-L10*exp(beta))
+# APOE.nb4 = 1
+L11 <- mapply(CumulLambda.APOE, nb4 = 1, t = age, u = 0)
+penetrance11 <-  1 - exp(-L11*exp(beta))
+
+# APOE.nb4 = 2
+L12 <- mapply(CumulLambda.APOE, nb4 = 2, t = age, u = 0)
+penetrance12 <-  1 - exp(-L12*exp(beta))
+
+# pour les non porteurs d'un variant de SORL1
+# nb allele 4 sur APOE = 0
+L00 <- mapply(CumulLambda.APOE, nb4 = 0, t = age, u = 0)
+penetrance00 <-  1 - exp(-L00)
+# nb allele 4 sur APOE = 1
+L01 <- mapply(CumulLambda.APOE, nb4 = 1, t = age, u = 0)
+penetrance01 <-  1 - exp(-L01)
+# nb allele 4 sur APOE = 2
+L02 <- mapply(CumulLambda.APOE, nb4 = 2, t = age, u = 0)
+penetrance02 <-  1 - exp(-L02)
+
+datapentrance = data.frame(penetrance = c(penetrance10, penetrance11, penetrance12,
+                                          penetrance00, penetrance01, penetrance02),
+                           sorl1 = rep(c("Porteur(SORL1)","Non Porteur(SORL1)"), each = 76*3),
+                           nb4 = (rep(rep(c("0 Allele 4", "1 allele 4", "2 allele 4"), each = 76), 2)),
+                           age = rep(40:115, time = 76*6))
+
+
+ggplot(data = datapentrance) +
+  geom_line(aes( x = age, y = penetrance, col = nb4, linetype = sorl1), size = 1)+
+  geom_vline(xintercept = 65)+
+  labs(title = "Courbes de pénétrance en fonction de SORL1 et APOE")+
+  theme_light()
+
+ggplot(data = datapentrance) +
+  geom_line(aes( x = age, y = penetrance, col = nb4), size = 1)+
+  geom_vline(xintercept = 65)+
+  labs(title = "Courbes de pénétrance en fonction de SORL1 et APOE")+
+  facet_wrap(facets = ~sorl1) +
+  theme_light() +
+  theme(legend.position = "bottom")
+```
+
+
+On peut remarquer que toutes les courbes de pénétrance des non porteurs du variant SORL1 sont en dessous de celles des porteurs du variant. Cette représentation nous permet de voir que la présence du variant SORL1 augmente le risque pour les individus de développer la maladie.
+On remarque aussi l'augmentation du nombre d'allèle 4 dans le génotype APOE augmente aussi le risque de développer la maladie. La courbe de pénétrances des individus n'ayant aucun allèle 4 est dessous de celle ayant 1 seul allèle qui est en dessous de celle des individus ayant 2 allèle 4 en fonction que l'on soit porteur ou non du variant.
+Un autre constat aussi est qu'avant 65 ans le risque de développer l'Alzhimer est presque nulle sauf pour les porteur du variant ayant 2 alleles 4. Pour ces individus la probabilité de développé la maladie avant 80 ans vaut 1.
+
+# Question 4
+
+Intervalle de confiance
+
+On procède par bootsrap pour tracer les intervalles de confiance des courbes de pénétrances. Ainsi pour chaque age on calcul un certain nombre de pénétrances (*Ex : * `nb_itération = 100`). On récupère donc pour cet âge 100 pénétrance. L'intevalle de confiance de la pénétrance pour cet age correpondra à l'intervalle définit par  le quantile d'ordre $\frac{\alpha}{2}$  et $1 - \frac{\alpha}{2}$ de la distribution des 500 pénétrance pour un age. 
+
+En réalisant ces étapes pour tous les âges, on obtiendra de ce fait un intervalle de confiance des courbes de pénétrances.
+
+Pour les non porteurs du variant SORL1, le risque de base en fonction de l'age et du génotype APOE est déjà connu et ne dépent donc pas des individus de `dataEVAL` 
+
+```{r}
+### Intervalle de confiance pour la pénétrance chez les non porteurs de variant de SORL1
+
+age <- 40:115 # âges auxquels on souhaite estimé la pénétrance 
+
+L <- mapply(CumulLambda.APOE, nb4 = 0, t = age, u = 0)
+plot(age, 1-exp(-L), ylim = c(0,1), ylab = "Penetrance", col = "blue", lwd = 2, type = "l", cex.lab=1.5)
+L <- mapply(CumulLambda.APOE, nb4 = 1, t = age, u = 0)
+lines(age, 1-exp(-L), ylim = c(0,1), ylab = "Penetrance", col = "orange", lwd = 2, type = "l", cex.lab=1.5)
+L <- mapply(CumulLambda.APOE, nb4 = 2, t = age, u = 0)
+lines(age, 1-exp(-L), ylim = c(0,1), ylab = "Penetrance", col = "red", lwd = 2, type = "l", cex.lab=1.5)
+
+nb_iteration <- 100
+# nb d'itérations
+matrice_penetrance0 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation
+# de la matrice de stockage
+matrice_penetrance1 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation
+# de la matrice de stockage
+matrice_penetrance2 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation
+# de la matrice de stockage
+for (k in 1:nb_iteration) {
+  u_k <- rnorm(1, mean = 0, sd = 1) # générer u
+  L0 <- mapply(CumulLambda.APOE, nb4 = 0, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur de 0 allèle e4 sur APOE
+  L1 <- mapply(CumulLambda.APOE, nb4 = 1, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur de 1 allèle e4 sur APOE
+  L2 <- mapply(CumulLambda.APOE, nb4 = 2, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur de 2 allèles e4 sur APOE
+  matrice_penetrance0[,k] <- 1 - exp(-L0) # dans la colonne k, on met les valeurs de pénétrance
+  matrice_penetrance1[,k] <- 1 - exp(-L1) # dans la colonne k, on met les valeurs de pénétrance
+  matrice_penetrance2[,k] <- 1 - exp(-L2) # dans la colonne k, on met les valeurs de pénétrance
+}
+
+IC_borne_inf00 <- apply(matrice_penetrance0, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup00 <- apply(matrice_penetrance0, 1, function(x){quantile(x, 0.975)})
+lines(age, IC_borne_inf00, col = "blue",  lty = 2, type = "l")
+lines(age, IC_borne_sup00, col = "blue",  lty = 2, type = "l")
+# IC pour APOE.nb4 = 1
+IC_borne_inf01 <- apply(matrice_penetrance1, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup01 <- apply(matrice_penetrance1, 1, function(x){quantile(x, 0.975)})
+lines(age, IC_borne_inf01, col = "orange",  lty = 2, type = "l")
+lines(age, IC_borne_sup01, col = "orange",  lty = 2, type = "l")
+# IC pour APOE.nb4 = 2
+IC_borne_inf02 <- apply(matrice_penetrance2, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup02 <- apply(matrice_penetrance2, 1, function(x){quantile(x, 0.975)})
+lines(age, IC_borne_inf02, col = "red",  lty = 2, type = "l")
+lines(age, IC_borne_sup02, col = "red",  lty = 2, type = "l")
+
+legend("topleft", fill = c("red", "orange", "blue", NA), border = NA, lty = c(NA, NA, NA, 2),  legend = c("2 alleles e4", "1 allele e4", "0 allele e4", "IC à 95%"), bty = "n")
+
+
+
+
+```
+
+Par contre en ce qui concerne les porteurs du variant, le risque dépend des individu de `dataEVAL`. 
+On introduit donc de l'aléatoire dans le calcul des pénétrances en tirant aléatoirement les individus avec remise. A chaque itération, on a une recombinaison de la base initiale `dataEVAL`. On calcule le paramètre $\hat\beta$ et les pénétrances correpondantes. Et les intervalles de confiances sont obtenues comme précédement. 
+
+```{r}
+
+### Calcul des IC chez les porteurs de variants d'intérêt de SORL1
+
+dataEval <- dataEval %>%
+  mutate(unique_indid =  paste(famid, indid))
+
+nb_iteration = 100
+age = 40:100
+matrice_penetrance0 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation pour les non porteurs d'allele e4 sur APOE
+matrice_penetrance1 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation (1 allele e4 sur APOE)
+matrice_penetrance2 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation (2 alleles e4 sur APOE)
+
+
+for (k in 1:nb_iteration) {
+#   # Recombinaison de la base
+
+ families.boot_k <- sample(1:27, 27, replace = TRUE)
+  unique_indid.boot_k <- outer(families.boot_k, 1:12, FUN = paste) # 12 individus par famille
+  # data retenues (avec doublons)
+  dataEval_boot_k <- dataEval[match(unique_indid.boot_k, dataEval$unique_indid), ]
+
+# Calcul des beta correpondant
+u_k <- rnorm(1, mean = 0, sd = 1)
+
+  num <- dataEval_boot_k %>%
+    filter(SOLR1.recode == 1 & index == 0) %>%
+    summarise(sum(status)) %>%
+    pull()
+  
+    dataEval_boot_k  <- dataEval_boot_k %>%
+      mutate(Lnc = mapply(CumulLambda.APOE, nb4 = dataEval_boot_k$APOE.nb4, t = dataEval_boot_k$age, u = u_k))
+      
+
+    denom <- dataEval_boot_k %>%
+    filter(SOLR1.recode == 1 & index == 0) %>%
+    summarise(sum(Lnc)) %>%
+    pull()
+      
+  beta = log(num/denom)
+  beta
+
+ # calcul de pénétrance
+  L0 <- mapply(CumulLambda.APOE, nb4 = 0, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur d'aucun allèle e4 sur APOE
+  L1 <- mapply(CumulLambda.APOE, nb4 = 1, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur d'1 allèle e4 sur APOE
+  L2 <- mapply(CumulLambda.APOE, nb4 = 2, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur de 2 allèles e4 sur APOE
+  matrice_penetrance0[,k] <- 1 - exp(-L0*exp(beta)) 
+  matrice_penetrance1[,k] <- 1 - exp(-L1*exp(beta)) 
+  matrice_penetrance2[,k] <- 1 - exp(-L2*exp(beta)) 
+
+  
+}
+
+
+```
+
+On récupère les intervalles de confiances pour les 100 différentes pénétrances estimées
+
+```{r}
+
+# Courbe pour les non porteurs d'allele e4 sur APOE
+IC_borne_inf10 <- apply(matrice_penetrance0, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup10 <- apply(matrice_penetrance0, 1, function(x){quantile(x, 0.975)})
+
+# Courbe pour les porteurs d'1 allele e4 sur APOE
+IC_borne_inf11 <- apply(matrice_penetrance1, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup11 <- apply(matrice_penetrance1, 1, function(x){quantile(x, 0.975)})
+
+# Courbe pour les porteurs de 2 alleles e4 sur APOE
+IC_borne_inf12 <- apply(matrice_penetrance2, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup12 <- apply(matrice_penetrance2, 1, function(x){quantile(x, 0.975)})
+
+# Pénétrance dans la base originale
+num <- dataEval %>%
+    filter(SOLR1.recode == 1 & index == 0) %>%
+    summarise(sum(status)) %>%
+    pull() 
+
+# denominateur
+dataEval  <- dataEval %>%
+      mutate(Lnc = mapply(CumulLambda.APOE, nb4 = APOE.nb4, t = age, u = u_k))
+
+
+denom <- dataEval %>%
+    filter(SOLR1.recode == 1 & index == 0) %>%
+    summarise(sum(Lnc)) %>%
+    pull()
+
+# beta
+beta = log(num/denom)
+
+# Courbe pour les non porteurs d'allele e4 sur APOE
+L =  mapply(CumulLambda.APOE, nb4 = 0, t = age, u = 0) 
+plot(age, 1 - exp(-L*exp(beta)), col = "blue", lwd = 2, ylim = c(0,1), type = "l", ylab = "Penetrance de la MA chez les porteurs d'un variant SORL1")
+# Courbe pour les porteurs d'1 allele e4 sur APOE
+L =  mapply(CumulLambda.APOE, nb4 = 1, t = age, u = 0) 
+lines(age, 1 - exp(-L*exp(beta)), col = "orange", lwd = 2, ylim = c(0,1))
+# Courbe pour les porteurs de 2 alleles e4 sur APOE
+L =  mapply(CumulLambda.APOE, nb4 = 2, t = age, u = 0) 
+lines(age, 1 - exp(-L*exp(beta)), col = "red", lwd = 2, ylim = c(0,1))
+
+
+# Représentation des intervalles de confiances
+
+lines(age, IC_borne_inf10, col = "blue",  lty = 2)
+lines(age, IC_borne_sup10, col= "blue", lty = 2)
+
+lines(age, IC_borne_inf11, col = "orange",  lty = 2)
+lines(age, IC_borne_sup11, col= "orange", lty = 2)
+
+lines(age, IC_borne_inf12, col = "red",  lty = 2)
+lines(age, IC_borne_sup12, col= "red", lty = 2)
+
+
+
+legend("topleft", fill = c("red", "orange", "blue", NA), border = NA, lty = c(NA, NA, NA, 2),  legend = c("2 alleles e4", "1 allele e4", "0 allele e4", "IC à 95%"), bty = "n")
+
+```
+
+
+## Question 5
+
+Estimation des coefficients constant par morceaux 
+
+Posons $\log \mathcal{L}(\beta)=\sum_{i}\left[\log \left(S\left(t_{i} \mid a_{i}, s_{i}\right)\right)+\delta_{i} \log \left(\lambda\left(t_{i} \mid a_{i}, s_{i}\right)\right)\right]$ 
+
+
+Soit $\hat{\beta}= (\hat{\beta}_{1}, \hat{\beta}_{2}, \hat{\beta}_{3})$ l'estimateur qui maximise la log-vraisemblance
+
+On suppose 
+- si t < 70ans alors $\hat{\beta(t)}$ vaut $\hat{\beta_1(t)}$
+
+- si $70 \leq t < 80$ alors $\hat{\beta(t)}$ vaut $\hat{\beta_2(t)}$
+
+- si $ t \geq 80$ alors $\hat{\beta(t)}$ vaut $\hat{\beta_3(t)}$
+
+
+$\lambda\left(t_{i} \mid a_{i}, s_{i}\right)=\lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right) \exp \left(\beta\left(t_{i}\right) \mathbb{1}_{s_{i}=S O R L 1+}\right)$
+
+
+Donc $\log \left(\lambda\left(t_{i} \mid a_{i}, s_{i}\right)\right)=\log \left(\lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)\right)+\beta\left(t_{i}\right) \mathbb{1}_{s_{i}=S O R L 1+}$
+
+- Si $t < 70$ alors $\log \left(\lambda\left(t_{i} \mid a_{i}, s_{i}\right)\right)=\log \left(\lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)\right)+\beta_{1} \mathbb{1}_{s_{i}=\operatorname{SORL} 1+}$
+- Si $70 \leq t < 80$ alors $\log \left(\lambda\left(t_{i} \mid a_{i}, s_{i}\right)\right)=\log \left(\lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)\right)+\beta_{2} \mathbb{1}_{s_{i}=\operatorname{SORL} 1+}$
+- Si $t  \geq 80$ alors $\log \left(\lambda\left(t_{i} \mid a_{i}, s_{i}\right)\right)=\log \left(\lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)\right)+\beta_{3} \mathbb{1}_{s_{i}=\operatorname{SORL} 1+}$
+
+
+Posons $\log \left(S\left(t_{i} \mid a_{i}, s_{i}\right)\right)=-\int_{0}^{t_{i}} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta(u) \mathbb{1}_{s_{i}=S O R L 1+}\right) d u$
+
+
+En détaillant chaque pour chaque tranche d'âge on a:
+- Si $t < 70$ : $\begin{aligned} t_{i}<70: \log \left(S\left(t_{i} \mid a_{i}, s_{i}\right)\right) &=-\int_{0}^{t_{i}} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta_{1} \mathbb{1}_{s_{i}=S O R L 1+}\right) d u \\ &=-\Lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right) \exp \left(\beta_{1} \mathbb{1}_{s_{i}=S O R L 1+}\right) \end{aligned}$
+
+
+- Si $70 \leq t < 80$ $\begin{aligned} \log \left(S\left(t_{i} \mid a_{i}, s_{i}\right)\right) &=-\int_{0}^{70} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta_{1} \mathbb{1}_{s_{i}=S O R L 1+}\right) d u \\ &-\int_{70}^{t_{i}} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta_{2} \mathbb{1}_{s_{i}=S O R L 1+}\right) d u \\ &=-\Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right) \exp \left(\beta_{1} \mathbb{1}_{s_{i}=\operatorname{SORL1+}}\right) \\ &-\left[\Lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)-\Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right)\right] \exp \left(\beta_{2} \mathbb{1}_{s_{i}=\operatorname{SORL1+}}\right) \end{aligned}$
+
+
+- Si $t  \geq 80$ $\begin{aligned} \log \left(S\left(t_{i} \mid a_{i}, s_{i}\right)\right) &=-\int_{0}^{70} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta_{1} \mathbb{1}_{s_{i}=\operatorname{SORL1+}}\right) d u \\ &-\int{ }_{70}^{{ }^{80}} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta_{2} \mathbb{1}_{s_{i}=\operatorname{soRL1+}}\right) d u-\int_{80}^{t_{i}} \lambda_{\mathrm{nc}}\left(u \mid a_{i}\right) \exp \left(\beta_{3} \mathbb{1}_{s_{i}=S O R L 1+}\right) d u \\ &=-\Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right) \exp \left(\beta_{1} \mathbb{1}_{s_{i}=\operatorname{SORL} 1+}\right) \\ &-\left[\Lambda_{\mathrm{nc}}\left(80 \mid a_{i}\right)-\Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right)\right] \exp \left(\beta_{2} \mathbb{1}_{s_{i}=\operatorname{SORL} 1+}\right)-\left[\Lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)-\Lambda_{\mathrm{nc}}\left(80 \mid a_{i}\right)\right] \exp \left(\beta_{3} \mathbb{1}_{s_{i}=\operatorname{SORL} 1+}\right) \end{aligned}$
+
+
+En rajoutant ces différent termes dans la vraisemblance de départ qu'on dérive en posant égale à 0.
+
+$$\hat{\beta}_{1}=\log \left(\frac{\sum_{i / t_{i}<70, \mathbb{1}_{s_{i}}=S O R L 1+} \delta_{i}}{\sum_{i / t_{i}<70,1_{s_{i}=S O R L 1+}} {\lambda_{nc}}\left(t_{i} \mid a_{i}\right)+\sum_{i / t_{i} \geq 70,1_{s_{i}=S O R L 1+}} \Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right)}\right)$$
+
+
+$$\hat\beta_2 = \log \left(\frac{\sum_{i 70 \leq t}<80 \delta_{i}}{\sum_{i 70 \leq t_{i}<80} \Lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)-\Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right)+\sum_{i t_{i} \geq 80} \Lambda_{\mathrm{nc}}\left(80 \mid a_{i}\right)-\Lambda_{\mathrm{nc}}\left(70 \mid a_{i}\right)}\right)$$
+
+$$
+\hat{\beta}_{3}=\log \left(\frac{\sum_{i t_{i} \geq 80} \delta_{i}}{\sum_{i t_{i} \geq 80} \Lambda_{\mathrm{nc}}\left(t_{i} \mid a_{i}\right)-\Lambda_{\mathrm{nc}}\left(80 \mid a_{i}\right)}\right)
+$$
+
+
+
+```{r}
+### Calcul de beta(t) constant par morceaux : beta0 (< 70 ans) et beta1 (>= 70 ans) (cas index exclu)
+
+compute_beta = function(dataEval = dataEval, u = 0){
+  
+
+  age = 40:100
+  
+  ## calcul de beta0 (< 70 ans)
+  # numerateur
+  num1 <- dataEval %>%
+      filter(SOLR1.recode == 1 & age < 70 & index == 0) %>%
+      summarise(sum(status)) %>%
+      pull() 
+    
+  
+  # denominateur
+  dataEval  <- dataEval %>%
+        mutate(Lnc = mapply(CumulLambda.APOE, nb4 = APOE.nb4, t = age, u = u), 
+               Lnc70 = mapply(CumulLambda.APOE, nb4 = APOE.nb4, t = 70, u = u),
+               Lnc80 = mapply(CumulLambda.APOE, nb4 = APOE.nb4, t = 80, u = u))
+  
+  
+  denom1 <- dataEval %>%
+      filter(SOLR1.recode == 1 & age <70 & index == 0) %>%
+      summarise(sum(Lnc)) %>%
+      pull() +
+    
+    dataEval %>%
+      filter(SOLR1.recode == 1 & age >= 70 & age < 80  & index == 0) %>%
+      summarise(sum(Lnc70)) %>%
+      pull() +
+    
+     dataEval %>%
+      filter(SOLR1.recode == 1 & age >= 80  & index == 0) %>%
+      summarise(sum(Lnc70)) %>%
+      pull()
+    
+  
+  # beta
+  beta1 = log(num1/denom1)
+  # calcul de beta2 (>= 70 ans et >80 ans)
+  # numerateur
+  num2 <- dataEval %>%
+      filter(SOLR1.recode == 1 & (age >= 70 & age < 80) & index == 0) %>%
+      summarise(sum(status)) %>%
+      pull() 
+  # denominateur
+  denom2 <-  dataEval %>%
+      filter(SOLR1.recode == 1 & age >= 70 & age <80  & index == 0) %>%
+      summarise(sum(Lnc - Lnc70 )) %>%
+      pull() +
+    dataEval %>%
+      filter(SOLR1.recode == 1 & age >= 80  & index == 0) %>%
+      summarise(sum(Lnc80 - Lnc70)) %>%
+      pull() 
+   
+   
+  # beta
+  beta2 = log(num2/denom2)
+  
+  
+  
+  #calcul de beta3 (>= 80 ans )
+  # numerateur
+  num3 <- dataEval %>%
+      filter(SOLR1.recode == 1 & (age >= 80) & index == 0) %>%
+      summarise(sum(status)) %>%
+      pull() 
+  # denominateur
+  
+  denom3 <-  dataEval %>%
+      filter(SOLR1.recode == 1 & age >= 80   & index == 0) %>%
+      summarise(sum(Lnc - Lnc80)) %>%
+      pull() 
+   
+    
+    
+  # beta
+  beta3 = log(num3/denom3)
+  beta = c(beta1, beta2, beta3)
+  return(beta)
+  
+}
+
+
+compute_beta(dataEval = dataEval)
+
+
+```
+
+Calcul d'intervalle de confiance
+
+```{r}
+dataEval <- dataEval %>%
+  mutate(unique_indid =  paste(famid, indid))
+
+nb_iteration = 100
+age = 40:100
+matrice_penetrance0 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation pour les non porteurs d'allele e4 sur APOE
+matrice_penetrance1 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation (1 allele e4 sur APOE)
+matrice_penetrance2 <- matrix(NA, nrow = length(age), ncol = nb_iteration) # initialisation (2 alleles e4 sur APOE)
+
+
+for (k in 1:nb_iteration) {
+  # Recombinaison de la base
+ # unique_indid.boot_k = sample(dataEval$unique_indid, size = dim(dataEval)[1], replace = TRUE)
+  
+ families.boot_k <- sample(1:27, 27, replace = TRUE)
+  unique_indid.boot_k <- outer(families.boot_k, 1:12, FUN = paste) # 12 individus par famille
+  # data retenues (avec doublons)
+  dataEval_boot_k <- dataEval[match(unique_indid.boot_k, dataEval$unique_indid), ]
+
+
+#dataEval_boot_k = dataEval %>%
+ # filter(unique_indid %in% unique_indid.boot_k)
+
+
+# Calcul des beta correpondant
+  u_k <- rnorm(1, mean = 0, sd = 1)
+
+  beta = compute_beta(dataEval = dataEval_boot_k, u = u_k)
+
+ # calcul de pénétrance
+  L0 <- mapply(CumulLambda.APOE, nb4 = 0, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur d'aucun allèle e4 sur APOE
+  L1 <- mapply(CumulLambda.APOE, nb4 = 1, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur d'1 allèle e4 sur APOE
+  L2 <- mapply(CumulLambda.APOE, nb4 = 2, t = age, u = u_k) # calcul du risque cumulé pour
+  # toutes les valeurs de age pour un porteur de 2 allèles e4 sur APOE
+  matrice_penetrance0[,k] <- ifelse(age < 70,1 -exp(-L0*exp(beta[1])) , ifelse( age >= 70 & age < 80, 1 - exp(-L0*exp(beta[2])) , 1 - exp(-L0*exp(beta[3]))))     
+  matrice_penetrance1[,k] <- ifelse(age < 70,1 - exp(-L1*exp(beta[1])), ifelse(age >= 70 & age < 80,1 - exp(-L1*exp(beta[2])), 1 - exp(-L1*exp(beta[3])))) 
+  matrice_penetrance2[,k] <- ifelse(age < 70,1 - exp(-L2*exp(beta[1])), ifelse(age >= 70 & age < 80, 1 - exp(-L2*exp(beta[2])), 1 -exp(-L2*exp(beta[3])))) 
+  
+  # matrice_penetrance0[,k] <- 1 - ifelse(age < 70,exp(-L0*exp(beta[1])), ifelse(age >= 70 & age < 80,exp(-L0*exp(beta[2])),ifelse(age >=80, exp(-L0*exp(beta[3])), 0) )) 
+  # 
+  # matrice_penetrance1[,k] <- 1 - ifelse(age < 70,exp(-L1*exp(beta[1])), ifelse(age >= 70 & age < 80,exp(-L1*exp(beta[2])), ifelse(age >=80, exp(-L0*exp(beta[3])), 0))) 
+  # 
+  # matrice_penetrance2[,k] <- 1 - ifelse(age < 70,exp(-L2*exp(beta[1])), ifelse(age >= 70 & age < 80,exp(-L2*exp(beta[2])), ifelse(age >=80, exp(-L0*exp(beta[3])), 0))) 
+
+  
+}
+
+# Courbe pour les non porteurs d'allele e4 sur APOE
+IC_borne_inf10 <- apply(matrice_penetrance0, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup10 <- apply(matrice_penetrance0, 1, function(x){quantile(x, 0.975)})
+
+# Courbe pour les porteurs d'1 allele e4 sur APOE
+IC_borne_inf11 <- apply(matrice_penetrance1, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup11 <- apply(matrice_penetrance1, 1, function(x){quantile(x, 0.975)})
+
+# Courbe pour les porteurs de 2 alleles e4 sur APOE
+IC_borne_inf12 <- apply(matrice_penetrance2, 1, function(x){quantile(x, 0.025)})
+IC_borne_sup12 <- apply(matrice_penetrance2, 1, function(x){quantile(x, 0.975)})
+
+# Pénétrance dans la base originale
+# beta
+beta = compute_beta(dataEval = dataEval, u = 0)
+
+# Courbe pour les non porteurs d'allele e4 sur APOE
+L =  mapply(CumulLambda.APOE, nb4 = 0, t = age, u = 0) 
+plot(age, 1 - ifelse(age < 70,exp(-L*exp(beta[1])), ifelse(age >= 70 & age < 80,exp(-L*exp(beta[2])), exp(-L*exp(beta[3])))) , 
+     col = "blue", lwd = 2, ylim = c(0,1), 
+     type = "l", 
+     ylab = "Penetrance de la MA chez les porteurs d'un variant SORL1")
+# Courbe pour les porteurs d'1 allele e4 sur APOE
+L =  mapply(CumulLambda.APOE, nb4 = 1, t = age, u = 0) 
+lines(age, 1 - ifelse(age < 70,exp(-L*exp(beta[1])), ifelse(age >= 70 & age < 80,exp(-L*exp(beta[2])), exp(-L*exp(beta[3])))), 
+      col = "orange", lwd = 2, ylim = c(0,1))
+# Courbe pour les porteurs de 2 alleles e4 sur APOE
+L =  mapply(CumulLambda.APOE, nb4 = 2, t = age, u = 0) 
+lines(age, 1 - ifelse(age < 70,exp(-L*exp(beta[1])), ifelse(age >= 70 & age < 80,exp(-L*exp(beta[2])), exp(-L*exp(beta[3])))), col = "red", lwd = 2, ylim = c(0,1))
+
+
+# Représentation des intervalles de confiances
+
+lines(age, IC_borne_inf10, col = "blue",  lty = 2)
+lines(age, IC_borne_sup10, col= "blue", lty = 2)
+
+lines(age, IC_borne_inf11, col = "orange",  lty = 2)
+lines(age, IC_borne_sup11, col= "orange", lty = 2)
+
+lines(age, IC_borne_inf12, col = "red",  lty = 2)
+lines(age, IC_borne_sup12, col= "red", lty = 2)
+
+
+
+legend("topleft", fill = c("red", "orange", "blue", NA), border = NA, lty = c(NA, NA, NA, 2),  legend = c("2 alleles e4", "1 allele e4", "0 allele e4", "IC à 95%"), bty = "n")
+
+
+```
+
+# Comparaison des modèles
+
+```{r}
+num <- dataEval %>%
+    filter(SOLR1.recode == 1 & index == 0) %>%
+    summarise(sum(status)) %>%
+    pull() 
+
+# denominateur
+dataEval  <- dataEval %>%
+      mutate(Lnc = mapply(CumulLambda.APOE, nb4 = APOE.nb4, t = age, u = u_k))
+
+
+denom <- dataEval %>%
+    filter(SOLR1.recode == 1 & index == 0) %>%
+    summarise(sum(Lnc)) %>%
+    pull()
+
+# beta
+beta = log(num/denom)
+
+dataEval$lambdanc <- mapply(lambda.APOE, nb4 = dataEval$APOE.nb4, t = dataEval$age, u = 0 )
+dataEval$Lnc <- mapply(CumulLambda.APOE, nb4 = dataEval$APOE.nb4, t = dataEval$age, u = 0)
+loglik <- sum( - dataEval[dataEval$status == 0 & dataEval$SOLR1.recode == 0,]$Lnc ) +
+  sum( - dataEval[dataEval$status == 0 & dataEval$SOLR1.recode == 1,]$Lnc*exp(beta)) +
+  sum( - dataEval[dataEval$status == 1 & dataEval$SOLR1.recode == 0,]$Lnc + 
+         log(dataEval[dataEval$status == 1 & dataEval$SOLR1.recode == 0,]$lambdanc)) +
+  sum( - dataEval[dataEval$status == 1 & dataEval$SOLR1.recode == 1,]$Lnc*exp(beta) + 
+         log(dataEval[dataEval$status == 1 & dataEval$SOLR1.recode == 1,]$lambdanc*exp(beta)))
+BIC <- -2*loglik + sum(dataEval$status)*1
+BIC
+```
+
+# Question 8 : Conclusion général
+
+- D'abord, les courbes de pénétrance indique que le variant perte de fonction SORL1 est associé a de forte valeur de pénétrance. Les individus porteurs du variant ont plus de chance de développé la maladie comparativement aux individus n'ayant pas le variant.
+
+- De plus le nombre d'allèle $\varepsilon_4$ dans le génotype APOE est aussi associé a de fortes valeur de pénétrance. On a remarquer que plus le nombre d'allèle  $\varepsilon_4$ était augmente plus la probabilité de développé la maladie augmente.
+
+- On remarque que pour les individu porteur du variant SORL1 et de 2 allèle 4, la proba de développer la maldie avant 80 ans vaut 1 (Pénétrance complète)
+
