@@ -1,0 +1,184 @@
+---
+title: "TP_Geno_rendre"
+author: "Hassan HOUSSEIN HOUMED"
+date: "18/02/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+## Importation de donnée
+
+```{r}
+sein_data <- read.table(file="Sein_data.txt",header=TRUE,sep="")
+sein_annot <- read.table(file="Sein_annot.txt",header=TRUE,sep="")
+```
+
+## A- Exploration des données
+
+Dans cette première partie, nous allons explorer les données d'expression du Dataset 1 (Sein_data).
+
+### Dimensions des données
+
+**Question A1 : Combien de gènes sont décrits dans les données ? sur combien d'individus ?** 
+
+```{r}
+dim(sein_data)
+dim(sein_annot)# On a 20530 gènes et 60 individus
+```
+
+# "Sein-data" est un jeu donnée d'expression de gènes normalisées.
+
+### Vérifier la normalisation
+
+Les données ont déjà été normalisées et loguées (log2). On peut visualiser les boxplots d'expression des gènes et vérifier leur alignement.
+
+
+
+Générez les boxplots d'expression de gènes sur l'ensemble des échantillons :
+```{r}
+boxplot(sein_data)
+```
+
+**Question A2 : La médiane d'expression des gènes se situe dans ces données autours de quelle valeur ?** 
+
+```{r}
+mean(apply(sein_data, 1, median)) 
+```
+### Description des annotations cliniques
+
+**Question A3 : Representer sous forme de barplot l'annotation du cancer de sein. Combien d'individus ont été diagnositiqués atteint du cancer de sein dans cet échantillon d'individus ?**  
+
+```{r}
+table(sein_annot[,4])
+barplot(table(sein_annot[,4]), col = c("darkgreen", "red"), horiz=TRUE)
+```
+### Rercherche d'individus aberrants par ACP
+
+On vérifie tout d'abord que les individus sont dans le même ordre dans les données d'expression et les annotations cliniques.
+
+```{r}
+all.equal(colnames(sein_data) , rownames(sein_annot))
+```
+L'objectif ici est d'identifier les principales sources de variation et les individus aberrants.
+L'analyse en composantes principales (ACP) permet d'observer la structure des données. On utilise ici la function *PCA* du package *FactoMineR*.  
+Attention, on ne souhaite représenter que le nuage des individus et non le cercle de corrélations des variables (ici les gènes) : pensez à préciser l'argument graph=FALSE. Colorez les indvidus en fonction de leur statut COVID19/control.
+
+```{r}
+library(FactoMineR)
+pcarez = PCA(data.frame(SampleType=sein_annot[,4], t(sein_data)), graph=FALSE, ind.sup=1, quali.sup=1)
+```
+
+Représentation uniquement du nuage des individus sur la première et deuxième composante :
+
+```{r}
+plot(pcarez,axes=c(1,2),habillage=1,choix="ind",label="ind",ylim=c(-400,200),xlim=c(-400,200))
+```
+
+# D'apres avoir colorié nos individus en fonction des personnes atteint ou non du cancer sur l'axe factorielle de l'ACP , on remarque qu'il n'y a pas la présence des individus qui representent des valeurs abbérentes.
+
+## B- Analyse Différentielle
+
+On cherche les gènes qui sont différentiellement exprimés entre les individus diagnostiqués atteints du cancer de sein et ceux diagnostiqués comme sains. Nous faisons l'hypothèse d'une distribution normale, les données étant log-transformées (cf. boxplot).  
+Il ici s'agit d'utiliser pour chaque gène un test statistique permettant de comparer les moyennes d'expression entre les deux conditions.  
+
+Nous utiliserons un t-test pour comparer l'expression moyenne entre ces deux groupes.
+
+**Question B2 : Combien de gènes sont difféntiellement exprimés sans correction pour les tests multiples à un seuil alpha de 5%  ? Comment sont distribuées les P-values ?**  
+
+Effectuez pour cela l'analyse différentielle sur l'ensemble des gènes à l'aide d'une boucle ou encore mieux de la fonction *apply* sur le code précédent. Récupérez la P-value pour chaque test. Générez l'histogramme des P-values.
+
+```{r}
+ttpv = apply(sein_data, 1, function(x){t.test(x~sein_annot[, 4])$p.value})
+sum(ttpv<0.05)
+
+hist(ttpv,main="Histogramme des P-values",xlab="P-values du test statistique.",
+     sub="Tumor versus control",ylab="Frequence")
+```
+**Question B3 : Combien de gènes sont difféntiellement exprimés avec correction pour les tests multiples (Benjamini-Hochberg et Bonferroni) à un seuil de 5% ? Comment sont distribuées les P-values ajustées ?**  
+
+Vous pouvez utiliser la fonction *p.adjust* pour la correction des tests multiples.
+
+```{r}
+ttpvBH=p.adjust(ttpv,method="BH")
+ttpvBonf=p.adjust(ttpv,method="bonferroni")
+
+sum(ttpvBH<0.05)
+sum(ttpvBonf<0.05)
+
+
+par(mfrow=c(1,2))
+hist(ttpvBH,main="Histogramme des adj P-values (BH)",xlab="P-values corrigées du test.",
+     sub="CTumor versus control",ylab="Frequence",xlim=c(0,1))
+
+hist(ttpvBonf,main="Histogramme des adj-P-values (Bonf.)",xlab="P-values corrigées du test statistique.",
+     sub="Tumor versus control",ylab="Frequence",xlim=c(0,1))
+```
+
+**Question B4 : Y-a-t il des gènes 4 fois plus exprimés chez les indvidus COVID19 par rapport aux sains?**    
+
+Afin d'estimer la différence d'expression pour chaque gènes entre les conditions COVID19/sain, nous allons calculer le log-Fold Change (logFC) pour chaque gène. Il s'agit, pour un gène, de la différence entre [la moyenne d'expression des individus d'une condition] et [la moyenne d'expression des individus de l'autre condition]. Ne pas oublier que les données ont été loguée avec le log2.
+
+```{r}
+logfc=apply(sein_data,1,function(x){
+mean(x[which(sein_annot[, 4]=="Tumor")]) - mean(x[which(sein_annot[, 4]=="Control")])
+    })
+
+sum(logfc>log2(4))
+which(logfc>log2(4))
+```
+Nous allons à présent réaliser un *Volcano Plot*, graphique classiquement réalisé dans le cas de l'analyse différentielle d'expression de gènes. Il permet de visualiser les gènes fortement différentiels en termes à la fois de P-values ajustées et de Fold Change et d'evaluer la symétrie entre gènes sur ou sous-exprimés entre conditions.
+Représentez pour cela à l'aide la fonction plot en abcisse le -log10 des P-values ajustées et en ordonnées le logFC. Colorez les gènes pour lesquels la P-value ajustée par BH est inférieure à 5 % et logFC supérieur à 4 en valeur absolue..
+
+**Question B5 : Au vu du Volcano Plot, vous semble-t-il y avoir plus de gènes fortement sous ou sur-exprimés en condition COVID19?**      
+
+
+```{r}
+plot(logfc, -log10(ttpvBH),xlab="Log Fold Change (Tumor versus control)",
+     ylab="p-values corrigées (-log10)",main="Volcano plot : Tumor", col = c("grey","red")[as.factor(ttpvBH<0.05 & abs(logfc)>log2(4))], pch=20)
+abline(h=-log10(0.05),col="red")
+abline(v=c(-2,2),col="red")
+```
+**Exportez en local la liste des gènes différentiels en considérant un seuil sur les p-values ajustées par BH à 5 % et un logFC supérieur à 4 en valeur absolue. **      
+
+
+```{r, eval = FALSE}
+
+listgenesDE = data.frame(geneID = rownames(sein_data)[ttpvBH<0.05 & abs(logfc)>log2(4)])
+write.table(listgenesDE, "listgenesDE.txt", sep="\t")
+
+```
+
+**Question B6 : L'expression de gènes différentiels est-elle homogène au sein des patients COVID19 ? **  
+
+Pour cela, nous allons réaliser une *heatmap* : représentation de la matrice d'expression restreinte aux gènes DE sous forme de carte de chaleur avec un dendrogramme en ligne et en colonne permettant de regrouper des patterns d'expression similaires. Nous utilisons la fonction *Heatmap* du package *ComplexHeatmap*. 
+On selectionne cette fois-ci les gènes différentiels avec un seuil sur les P-values ajustées par BH à 5 % et un logFC supérieur à 4 en valeur absolue.
+
+
+```{r}
+selecDE = rownames(sein_data)[ttpvBH<=0.05 & abs(logfc)>log2(4)]
+length(selecDE)
+
+dataH = sein_data[selecDE,]
+ha = HeatmapAnnotation(statut = sein_annot[,4],
+col = list("statut"= c("Tumor" = "red", "Control" = "green")))
+
+H1 = Heatmap(dataH,row_names_gp = gpar(fontsize = 5), column_names_gp = gpar(fontsize = 7),clustering_distance_rows = "pearson",
+clustering_method_rows = "ward.D",
+clustering_distance_columns = "pearson",
+clustering_method_columns = "ward.D", name = " ", top_annotation = ha, column_title = "H1")
+H1
+
+H2 = Heatmap(dataH-rowMeans(dataH),row_names_gp = gpar(fontsize = 5), column_names_gp = gpar(fontsize = 7),clustering_distance_rows = "pearson",
+clustering_method_rows = "ward.D",
+clustering_distance_columns = "pearson",
+clustering_method_columns = "ward.D", name = " ", top_annotation = ha, col = colorRamp2(c(-2, 0, 2),c("blue", "white", "red")), column_title = "H2")
+H2
+
+```
+**Question B7 : Quelle est la différence entre le heatmap H1 et H2? **  
+
+H1 est réalisé sur données non centrées contrairement à H2. Le centrage des données pour la représentation du Heatmap permet de mieux faire ressortir les differences d'expression entre les individus pour chaque gène.
+
+
